@@ -13,7 +13,7 @@ const hero = () => {
         fade={true}
       />
 
-      <div className="hero bg-transparent min-h-[100vh] text-black">
+      <div className="hero  min-h-[100vh] text-black ">
         <div className="hero-content flex-col lg:flex-row-reverse gap-x-20">
           <img
             src="/svgs/Hero.svg"

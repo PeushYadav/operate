@@ -3,7 +3,7 @@ import link from "next/link"
 
 const timeLine = () => {
   return (
-    <ul className="timeline timeline-snap-icon text-black max-md:timeline-compact timeline-vertical px-5">
+    <ul className="timeline timeline-snap-icon py-20 text-black max-md:timeline-compact timeline-vertical px-5">
       <li>
         <div className="timeline-middle">
           <svg
@@ -46,7 +46,7 @@ const timeLine = () => {
           </svg>
         </div>
         <div className="timeline-end md:mb-10">
-          <time className="font-mono italic bg-yellow-400">Step 2</time>
+          <time className="font-mono italic bg-yellow-400 ">Step 2</time>
           <div className="text-lg font-black">System Configuration</div>
           Based on the user's requirements, Operate selects the appropriate Linux base distribution,
           desktop environment, kernel optimizations, and software packages required for the workflow.
@@ -124,7 +124,7 @@ const timeLine = () => {
           </svg>
         </div>
         <div className="timeline-start mb-10 md:text-end">
-          <time className="font-mono italic bg-yellow-400">Step 5</time>
+          <time className="font-mono italic">Step 5</time>
           <div className="text-lg font-black">Download & Use</div>
           The user receives the custom ISO image and can boot it on their system or install it directly.
           From the first startup, the operating system is already configured for their workflow,

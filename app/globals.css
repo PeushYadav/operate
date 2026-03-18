@@ -26,3 +26,32 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 
 }
+
+.logos {
+  overflow: hidden;
+  white-space: nowrap;
+  position: relative;
+}
+
+.logos-slide {
+  display: inline-flex;
+  align-items: center;
+  gap: 40px;
+}
+
+/* 🔥 THIS IS WHAT YOU ARE MISSING */
+@keyframes slide {
+  0% {
+    transform: translateX(0%);
+  }
+
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+/* Optional: smoother animation */
+.logos-slide img {
+  height: 40px;
+  object-fit: contain;
+}
