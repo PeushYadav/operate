@@ -38,7 +38,7 @@ const hero = () => {
               From pre-installed tools and system optimizations to interface design and performance tuning, Operate delivers an OS that works exactly the way you do.
             </p>
             <div className="flex justify-center items-center">
-              <Button text="Lets Build! " href="/new" varient="disabled" />
+              <Button text="Lets Build! " href="/new" varient="primary" />
             </div>
 
           </div>
