@@ -13,22 +13,18 @@ const hero = () => {
         fade={true}
       />
 
-      <div className="hero  min-h-[100vh] text-black ">
-        <div className="hero-content flex-col lg:flex-row-reverse gap-x-20">
-          <img
-            src="/svgs/Hero.svg"
-            alt="Hero Image Alt"
-            className="w-full max-w-[500px] h-auto"
-          />
+      <div className="hero  min-h-[90vh] text-black flex justify-center items-center  ">
+        <div className="hero-content flex-col lg:flex-row-reverse gap-x-20 bg-white max-w-[75%] shadow-amber-200 shadow-md border-solid rounded-md">
+
           <div>
             <span className="text-5xl font">
-              <span className="bg-yellow-400 text-black-800">Operate</span>— Linux, Built for Your
+              <span className=" text-black-800">Operate</span>— Linux, Built for Your
               <span className="text-rotate">
                 <span>
-                  <span className="bg-teal-400 text-black-800 px-2"> Development</span>
-                  <span className="bg-red-400 text-black-800 px-2"> cybersecurity</span>
-                  <span className="bg-blue-400 text-black-800 px-2"> productivity</span>
-                  <span className="bg-violet-400 text-black-800 px-2"> Workflow</span>
+                  <span className=" text-black-800 px-2"> Development</span>
+                  <span className=" text-black-800 px-2"> cybersecurity</span>
+                  <span className=" text-black-800 px-2"> productivity</span>
+                  <span className=" text-black-800 px-2"> Workflow</span>
                 </span>
               </span>
             </span>
