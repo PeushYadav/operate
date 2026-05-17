@@ -38,7 +38,7 @@ const BackgroundDots: React.FC<BackgroundDotsProps> = ({
 
   return (
     <div
-      className={`absolute z-{-1} inset-0 h-full w-full  ${className}`}
+      className={`absolute -z-10 inset-0 h-full w-full  ${className}`}
       style={backgroundStyle}
       {...props}
     />

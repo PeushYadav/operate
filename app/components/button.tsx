@@ -4,18 +4,18 @@ import Link from "next/link";
 type ButtonCustomProps = {
   text: string;
   href: string;
-  varient?: "ghost" | "primary" | "secondary"; // adjust as per your design system
+  variant?: "ghost" | "primary" | "secondary";
 };
 
 const ButtonCustom: React.FC<ButtonCustomProps> = ({
   text,
   href,
-  varient = "ghost",
+  variant = "ghost",
 }) => {
   return (
     <Link href={href}>
       <button
-        className={`btn border-solid bg-yellow-400 text-black rounded-xl btn-${varient}`}
+        className={`btn border-solid bg-yellow-400 text-black rounded-xl btn-${variant}`}
       >
         {text}
       </button>

@@ -1,13 +1,9 @@
+import Navbar from "../components/navbar";
 
-
-import Image from "next/image";
-import Link from "next/link";
-import Navbar from "../components/navbar"
-const recommendDist = () => {
+export default function RecommendPage() {
   return (
     <>
       <Navbar />
     </>
-  )
+  );
 }
-export default recommendDist  
