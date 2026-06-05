@@ -1,4 +1,5 @@
 import type { OsConfig } from "./types";
+import { HYPRLAND_PACKAGES, HYPRLAND_SERVICES } from "./hyprland";
 
 export type Template = {
   name: string;
@@ -11,7 +12,7 @@ const baseDefaults = {
   kernel: "linux" as const,
   bootloader: "systemd-boot" as const,
   hostname: "operate",
-  username: "operator",
+  username: "operate",
   locale: "en_US.UTF-8",
   timezone: "UTC",
   keymap: "us",
@@ -20,6 +21,17 @@ const baseDefaults = {
 };
 
 export const templates: Template[] = [
+  {
+    name: "hyprland-default",
+    description:
+      "Operate's default — Hyprland (Wayland tiling WM) + Waybar + foot + wofi. Comes with a documented keybinding set (Super+Enter terminal, Super+K cheatsheet) and an opinionated waybar/style baseline.",
+    config: {
+      ...baseDefaults,
+      desktop: "hyprland",
+      packages: HYPRLAND_PACKAGES,
+      services: HYPRLAND_SERVICES,
+    },
+  },
   {
     name: "gaming",
     description: "High performance gaming setup with GPU support",

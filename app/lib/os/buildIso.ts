@@ -11,10 +11,25 @@ import {
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import type { BuildJob, OsConfig } from "./types";
+import type { BuildJob, BuildStatus, OsConfig } from "./types";
+import { updateBuildStatus } from "../db/builds";
+import {
+  HYPRLAND_CONF,
+  WAYBAR_CONFIG,
+  WAYBAR_STYLE,
+  KEYBINDINGS_DOC,
+  KEYBINDS_LAUNCHER_SCRIPT,
+} from "./hyprland";
 
 const DEFAULT_PASSWORD = "operate";
 const DM_NAMES = new Set(["sddm", "gdm", "lightdm", "ly", "lxdm"]);
+const OPERATE_UID = 1000;
+const OPERATE_GID = 1000;
+const WHEEL_GID = 998;
+
+const DESKTOP_SESSIONS: Record<string, string> = {
+  hyprland: "hyprland.desktop",
+};
 
 const PROVIDER_MAP: Record<string, string> = {
   mysql: "mariadb",
@@ -53,6 +68,23 @@ export const listJobs = () => Array.from(jobs.values());
 
 const newJobId = () => randomBytes(6).toString("hex");
 
+function diagnoseFailure(rawError: string, log: string): string {
+  if (
+    /signature from .* is invalid/i.test(log) ||
+    /corrupted.*PGP signature/i.test(log) ||
+    /key .* is unknown/i.test(log)
+  ) {
+    return "Host archlinux-keyring is out of date — pacstrap can't verify package signatures. On the host running the build, run: sudo pacman -Sy archlinux-keyring (or a full sudo pacman -Syu).";
+  }
+  if (/sudo: a password is required/i.test(log)) {
+    return "mkarchiso needs passwordless sudo. Configure /etc/sudoers.d to allow `NOPASSWD: /usr/bin/mkarchiso` for the user running the dev server.";
+  }
+  if (/archiso baseline profile not found/i.test(rawError)) {
+    return "archiso is not installed on the host. Run: sudo pacman -S archiso.";
+  }
+  return rawError;
+}
+
 const sanitize = (s: string, fallback: string) =>
   /^[a-z0-9-]{1,32}$/.test(s) ? s : fallback;
 
@@ -62,6 +94,186 @@ const appendLog = (job: BuildJob, chunk: string) => {
     job.log = job.log.slice(-150_000);
   }
 };
+
+async function applyBootBranding(profileDir: string, job: BuildJob) {
+  const touched: string[] = [];
+
+  const entriesDir = path.join(profileDir, "efiboot", "loader", "entries");
+  if (existsSync(entriesDir)) {
+    for (const entry of await readdir(entriesDir)) {
+      if (!entry.endsWith(".conf")) continue;
+      const p = path.join(entriesDir, entry);
+      const original = await readFile(p, "utf8");
+      const updated = original.replace(/^title\s+.*$/im, "title   operate");
+      if (updated !== original) {
+        await writeFile(p, updated);
+        touched.push(`efiboot/${entry}`);
+      }
+    }
+  }
+
+  const loaderConf = path.join(profileDir, "efiboot", "loader", "loader.conf");
+  if (existsSync(loaderConf)) {
+    let content = await readFile(loaderConf, "utf8");
+    content = /^timeout\s+/m.test(content)
+      ? content.replace(/^timeout\s+.*$/m, "timeout 2")
+      : `timeout 2\n${content}`;
+    await writeFile(loaderConf, content);
+    touched.push("efiboot/loader.conf");
+  }
+
+  const syslinuxDir = path.join(profileDir, "syslinux");
+  if (existsSync(syslinuxDir)) {
+    for (const f of await readdir(syslinuxDir)) {
+      if (!f.endsWith(".cfg")) continue;
+      const p = path.join(syslinuxDir, f);
+      let content = await readFile(p, "utf8");
+      const before = content;
+      content = content.replace(/^(\s*MENU LABEL\s+).*$/gim, "$1operate");
+      content = content.replace(/^(MENU TITLE\s+).*$/gim, "$1operate");
+      if (content !== before) {
+        await writeFile(p, content);
+        touched.push(`syslinux/${f}`);
+      }
+    }
+  }
+
+  const grubCfg = path.join(profileDir, "grub", "grub.cfg");
+  if (existsSync(grubCfg)) {
+    let content = await readFile(grubCfg, "utf8");
+    const before = content;
+    content = content.replace(/menuentry\s+"[^"]*"/g, 'menuentry "operate"');
+    content = content.replace(/menuentry\s+'[^']*'/g, "menuentry 'operate'");
+    if (content !== before) {
+      await writeFile(grubCfg, content);
+      touched.push("grub/grub.cfg");
+    }
+  }
+
+  appendLog(
+    job,
+    `[operate] bootloader branding applied (${touched.length} files): ${touched.join(", ") || "(none — baseline had no menus)"}\n`,
+  );
+}
+
+async function writeIssueBanner(profileDir: string) {
+  const etc = path.join(profileDir, "airootfs", "etc");
+  await mkdir(etc, { recursive: true });
+  // \x1b[1;37m = bold white, \x1b[0m = reset. \\n / \\l are agetty placeholders
+  // (hostname / tty) that getty expands at runtime.
+  const issue = `\n  \x1b[1;37moperate\x1b[0m  \\n on \\l\n\n`;
+  await writeFile(path.join(etc, "issue"), issue);
+}
+
+async function applyHyprlandDefaults(profileDir: string) {
+  const airoot = path.join(profileDir, "airootfs");
+  const skelHypr = path.join(airoot, "etc", "skel", ".config", "hypr");
+  const skelWaybar = path.join(airoot, "etc", "skel", ".config", "waybar");
+  const etcOperate = path.join(airoot, "etc", "operate");
+  const localBin = path.join(airoot, "usr", "local", "bin");
+
+  await mkdir(skelHypr, { recursive: true });
+  await mkdir(skelWaybar, { recursive: true });
+  await mkdir(etcOperate, { recursive: true });
+  await mkdir(localBin, { recursive: true });
+
+  await writeFile(path.join(skelHypr, "hyprland.conf"), HYPRLAND_CONF);
+  await writeFile(path.join(skelWaybar, "config"), WAYBAR_CONFIG);
+  await writeFile(path.join(skelWaybar, "style.css"), WAYBAR_STYLE);
+  await writeFile(path.join(etcOperate, "keybindings.txt"), KEYBINDINGS_DOC);
+  await writeFile(
+    path.join(localBin, "operate-keybinds"),
+    KEYBINDS_LAUNCHER_SCRIPT,
+    { mode: 0o755 },
+  );
+}
+
+function hashPassword(plain: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const salt = randomBytes(8)
+      .toString("base64")
+      .replace(/[+/=]/g, "")
+      .slice(0, 16);
+    const child = spawn("openssl", ["passwd", "-6", "-salt", salt, plain]);
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (b: Buffer) => (out += b.toString()));
+    child.stderr.on("data", (b: Buffer) => (err += b.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(out.trim());
+      else
+        reject(
+          new Error(
+            `openssl passwd -6 failed (exit ${code}): ${err.trim() || out.trim()}`,
+          ),
+        );
+    });
+  });
+}
+
+async function bakeUserAndAutologin(
+  profileDir: string,
+  username: string,
+  desktop: string,
+  job: BuildJob,
+) {
+  const airootEtc = path.join(profileDir, "airootfs", "etc");
+  await mkdir(airootEtc, { recursive: true });
+
+  const [rootHash, userHash] = await Promise.all([
+    hashPassword(DEFAULT_PASSWORD),
+    hashPassword(DEFAULT_PASSWORD),
+  ]);
+
+  // Days since epoch — shadow(5) "last password change" field
+  const today = Math.floor(Date.now() / 86_400_000);
+
+  await writeFile(
+    path.join(airootEtc, "passwd"),
+    `root:x:0:0:root:/root:/bin/bash\n` +
+      `${username}:x:${OPERATE_UID}:${OPERATE_GID}:Operate User:/home/${username}:/bin/bash\n`,
+  );
+
+  await writeFile(
+    path.join(airootEtc, "shadow"),
+    `root:${rootHash}:${today}:0:99999:7:::\n` +
+      `${username}:${userHash}:${today}:0:99999:7:::\n`,
+  );
+
+  await writeFile(
+    path.join(airootEtc, "group"),
+    `root:x:0:\n` +
+      `wheel:x:${WHEEL_GID}:${username}\n` +
+      `${username}:x:${OPERATE_GID}:\n`,
+  );
+
+  await writeFile(
+    path.join(airootEtc, "gshadow"),
+    `root:!*::\n` +
+      `wheel:!::${username}\n` +
+      `${username}:!::\n`,
+  );
+
+  appendLog(
+    job,
+    `[operate] baked ${username} (uid ${OPERATE_UID}, wheel) into airootfs /etc/{passwd,shadow,group,gshadow}\n`,
+  );
+
+  const session = DESKTOP_SESSIONS[desktop];
+  if (session) {
+    const sddmDir = path.join(airootEtc, "sddm.conf.d");
+    await mkdir(sddmDir, { recursive: true });
+    await writeFile(
+      path.join(sddmDir, "autologin.conf"),
+      `[Autologin]\nUser=${username}\nSession=${session}\n`,
+    );
+    appendLog(
+      job,
+      `[operate] SDDM autologin configured → ${username} → ${session}\n`,
+    );
+  }
+}
 
 async function prepareProfile(
   jobDir: string,
@@ -154,7 +366,7 @@ async function prepareProfile(
     presetLines.join("\n") + "\n",
   );
 
-  const username = sanitize(config.username, "operator");
+  const username = sanitize(config.username, "operate");
 
   const motd =
     `Welcome to your Operate-built Arch Linux ISO.\n` +
@@ -170,47 +382,7 @@ async function prepareProfile(
   const systemdSystem = path.join(etc, "systemd", "system");
   await mkdir(systemdSystem, { recursive: true });
 
-  const localBin = path.join(profileDir, "airootfs", "usr", "local", "bin");
-  await mkdir(localBin, { recursive: true });
-
-  const firstbootScript =
-    `#!/bin/bash\n` +
-    `set -e\n` +
-    `USERNAME='${username}'\n` +
-    `PASSWORD='${DEFAULT_PASSWORD}'\n` +
-    `if ! id "$USERNAME" >/dev/null 2>&1; then\n` +
-    `  useradd -m -G wheel -s /bin/bash "$USERNAME"\n` +
-    `fi\n` +
-    `echo "root:$PASSWORD" | chpasswd\n` +
-    `echo "$USERNAME:$PASSWORD" | chpasswd\n`;
-  await writeFile(path.join(localBin, "operate-firstboot"), firstbootScript, {
-    mode: 0o755,
-  });
-
-  const firstbootUnit =
-    `[Unit]\n` +
-    `Description=Operate first-boot account setup\n` +
-    `After=local-fs.target\n` +
-    `Before=display-manager.service systemd-user-sessions.service getty@tty1.service\n` +
-    `\n` +
-    `[Service]\n` +
-    `Type=oneshot\n` +
-    `ExecStart=/usr/local/bin/operate-firstboot\n` +
-    `RemainAfterExit=yes\n` +
-    `\n` +
-    `[Install]\n` +
-    `WantedBy=multi-user.target\n`;
-  await writeFile(
-    path.join(systemdSystem, "operate-firstboot.service"),
-    firstbootUnit,
-  );
-
-  const multiUserWants = path.join(systemdSystem, "multi-user.target.wants");
-  await mkdir(multiUserWants, { recursive: true });
-  await symlink(
-    "../operate-firstboot.service",
-    path.join(multiUserWants, "operate-firstboot.service"),
-  );
+  await bakeUserAndAutologin(profileDir, username, config.desktop, job);
 
   const sudoersD = path.join(etc, "sudoers.d");
   await mkdir(sudoersD, { recursive: true });
@@ -230,6 +402,14 @@ async function prepareProfile(
     );
   }
 
+  if (config.desktop === "hyprland") {
+    await applyHyprlandDefaults(profileDir);
+    appendLog(job, `[operate] applied Hyprland defaults (waybar + keybinds)\n`);
+  }
+
+  await applyBootBranding(profileDir, job);
+  await writeIssueBanner(profileDir);
+
   const profileDef = path.join(profileDir, "profiledef.sh");
   let pd = await readFile(profileDef, "utf8");
   pd = pd.replace(
@@ -240,6 +420,11 @@ async function prepareProfile(
     /iso_label=".*"/,
     `iso_label="OPERATE_${Date.now().toString(36).toUpperCase()}"`,
   );
+  // mkarchiso strips mode bits during the airootfs overlay (cp -af
+  // --no-preserve=mode), so credential files default to 0644 unless we
+  // re-assert perms via file_permissions. /etc/shadow is already locked down
+  // by baseline; add /etc/gshadow alongside it.
+  pd += `\nfile_permissions+=(\n  ["/etc/gshadow"]="0:0:400"\n)\n`;
   await writeFile(profileDef, pd);
 
   return profileDir;
@@ -284,8 +469,10 @@ function runMkarchiso(
   });
 }
 
-export async function startBuild(config: OsConfig): Promise<BuildJob> {
-  const id = newJobId();
+export async function startBuild(
+  config: OsConfig,
+  id: string = newJobId(),
+): Promise<BuildJob> {
   const jobDir = path.join(BUILD_ROOT, id);
   await mkdir(jobDir, { recursive: true });
 
@@ -298,9 +485,23 @@ export async function startBuild(config: OsConfig): Promise<BuildJob> {
   };
   jobs.set(id, job);
 
+  const syncStatus = async (status: BuildStatus, isoName?: string | null) => {
+    try {
+      await updateBuildStatus({ id, status, isoName });
+    } catch (err) {
+      appendLog(
+        job,
+        `[operate] WARN: failed to update build status in DB: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
+  };
+
   (async () => {
     try {
       job.status = "running";
+      await syncStatus("running");
       appendLog(job, `[operate] job ${id} starting\n`);
       const profileDir = await prepareProfile(jobDir, config, job);
       appendLog(job, `[operate] profile prepared at ${profileDir}\n`);
@@ -320,11 +521,14 @@ export async function startBuild(config: OsConfig): Promise<BuildJob> {
       job.status = "done";
       job.finishedAt = Date.now();
       appendLog(job, `[operate] done: ${job.isoPath}\n`);
+      await syncStatus("done", iso);
     } catch (err) {
       job.status = "failed";
-      job.error = err instanceof Error ? err.message : String(err);
+      const rawError = err instanceof Error ? err.message : String(err);
+      job.error = diagnoseFailure(rawError, job.log);
       job.finishedAt = Date.now();
       appendLog(job, `[operate] FAILED: ${job.error}\n`);
+      await syncStatus("failed");
     }
   })();
 
