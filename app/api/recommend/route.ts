@@ -48,13 +48,18 @@ GPU rules:
 - If Intel iGPU, include "mesa" + "lib32-mesa" + "vulkan-intel".
 - If unsure but GPU support is requested, default to AMD/Intel open stack.
 
+Default template:
+- **Default to "hyprland-default"** unless the user explicitly asks for a different desktop, wants a Windows-like/beginner GUI, needs a specific desktop for compatibility, or describes a workflow the default cannot serve. Hyprland is Operate's house default: a Wayland tiling WM with Waybar, foot, wofi, and a documented Super-based keybinding set that the build pipeline lays down automatically.
+- Only fall back to "gaming" (KDE Plasma) for explicit gaming asks where Plasma compatibility matters, "developer" (i3) when the user specifically requests i3 or an X11 WM, or "general" (GNOME) for explicit beginner/GNOME requests.
+- When you keep "hyprland-default", preserve its packages and services as-is and only add to them; do not strip Hyprland, Waybar, foot, wofi, mako, the Wayland portal, or the SDDM display manager.
+
 Experience rules:
-- Beginner → desktop = "gnome" or "kde", bootloader = "systemd-boot", include a graphical login manager (gdm/sddm) and its service.
-- Advanced → tiling WM (i3/hyprland/sway) is acceptable, fewer GUI defaults.
+- Beginner → unless they ask for GNOME/KDE specifically, still default to hyprland-default; the bundled keybinding cheatsheet (Super + K) is the onboarding.
+- Advanced → tiling WM (hyprland is the default; i3/sway are acceptable if asked).
 
 Always include: "base", "linux-firmware", "networkmanager", "sudo", "nano", and the chosen kernel package in packages. Always include "NetworkManager" in services. Always include a display-manager service if a graphical desktop is selected.
 
-Hostname/username must be lowercase, alphanumeric or hyphen, ≤ 32 chars. Default hostname "operate", default username "operator" unless the user specifies otherwise.
+Hostname/username must be lowercase, alphanumeric or hyphen, ≤ 32 chars. Default hostname "operate", default username "operate" unless the user specifies otherwise. (Username intentionally matches the hostname so users can log in by typing "operate".)
 
 postInstall is an array of bash commands that will run inside the live system's airootfs customize hook (as root). Use it for things like enabling extra repos, writing config files, or creating the user. Keep it minimal and idempotent. Do not include "systemctl enable" for services already listed in "services" — the pipeline handles those.
 

@@ -31,6 +31,8 @@ export default function NewBuilder() {
   const [recError, setRecError] = useState<string | null>(null);
   const [recommendation, setRecommendation] =
     useState<RecommendSuccess | null>(null);
+  const [editedPackages, setEditedPackages] = useState<string[]>([]);
+  const [newPackageInput, setNewPackageInput] = useState("");
 
   const [build, setBuild] = useState<BuildState | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -60,6 +62,8 @@ export default function NewBuilder() {
         return;
       }
       setRecommendation(data);
+      setEditedPackages(Array.from(new Set(data.config.packages)));
+      setNewPackageInput("");
     } catch (err) {
       setRecError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -78,6 +82,21 @@ export default function NewBuilder() {
   const submitPrompt = () => {
     if (prompt.trim().length < 10) return;
     requestRecommendation({ prompt });
+  };
+
+  const addPackage = () => {
+    const name = newPackageInput.trim();
+    if (!name) return;
+    if (editedPackages.includes(name)) {
+      setNewPackageInput("");
+      return;
+    }
+    setEditedPackages((prev) => [...prev, name]);
+    setNewPackageInput("");
+  };
+
+  const removePackage = (name: string) => {
+    setEditedPackages((prev) => prev.filter((p) => p !== name));
   };
 
   const startBuild = async (config: OsConfig) => {
@@ -270,13 +289,76 @@ export default function NewBuilder() {
               </span>
             </div>
             <p className="text-sm text-zinc-400 mb-4">{recommendation.reason}</p>
-            <pre className="text-xs bg-zinc-950 border border-zinc-800 rounded-lg p-4 overflow-x-auto text-zinc-300">
-              {JSON.stringify(recommendation.config, null, 2)}
-            </pre>
+
+            <div className="flex items-baseline justify-between mb-3">
+              <label className="text-xs font-mono uppercase tracking-wider text-zinc-500">
+                Packages
+              </label>
+              <span className="text-xs font-mono text-zinc-500">
+                {editedPackages.length}
+              </span>
+            </div>
+
+            {editedPackages.length === 0 ? (
+              <p className="text-xs text-zinc-500 italic mb-3">
+                No packages — add at least one before building.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2 mb-3">
+                {editedPackages.map((pkg) => (
+                  <span
+                    key={pkg}
+                    className="inline-flex items-center gap-1.5 pl-3 pr-1 py-1 rounded-full border border-zinc-700 bg-zinc-800 text-xs"
+                  >
+                    <span className="font-mono text-zinc-200">{pkg}</span>
+                    <button
+                      type="button"
+                      onClick={() => removePackage(pkg)}
+                      aria-label={`Remove ${pkg}`}
+                      className="w-5 h-5 inline-flex items-center justify-center rounded-full text-zinc-500 hover:text-red-400 hover:bg-zinc-900 transition"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <input
+                value={newPackageInput}
+                onChange={(e) => setNewPackageInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addPackage();
+                  }
+                }}
+                placeholder="add a package (e.g. firefox)"
+                className="flex-1 px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+              <button
+                type="button"
+                onClick={addPackage}
+                disabled={!newPackageInput.trim()}
+                className="px-4 py-2 rounded-lg border border-zinc-700 text-zinc-300 text-sm hover:border-amber-400 hover:text-amber-400 transition disabled:opacity-50 disabled:hover:border-zinc-700 disabled:hover:text-zinc-300"
+              >
+                + Add
+              </button>
+            </div>
+
             <button
-              onClick={() => startBuild(recommendation.config)}
-              disabled={!!build && build.status === "running"}
-              className="mt-4 w-full py-3 rounded-lg bg-emerald-500 text-black font-semibold hover:bg-emerald-400 transition disabled:opacity-50"
+              onClick={() =>
+                startBuild({
+                  ...recommendation.config,
+                  packages: editedPackages,
+                })
+              }
+              disabled={
+                editedPackages.length === 0 ||
+                (!!build && build.status === "running")
+              }
+              className="mt-6 w-full py-3 rounded-lg bg-emerald-500 text-black font-semibold hover:bg-emerald-400 transition disabled:opacity-50"
             >
               {build?.status === "running"
                 ? "Building..."
