@@ -118,14 +118,14 @@ const Hero = () => {
           </div>
 
           {/* Social proof strip */}
-          <div className="mt-16 flex flex-wrap items-center gap-6 text-zinc-600 text-xs font-mono">
+          {/* <div className="mt-16 flex flex-wrap items-center gap-6 text-zinc-600 text-xs font-mono">
             {["Dev-ready", "Air-gapped support", "Rolling release", "Open source"].map((tag) => (
               <span key={tag} className="flex items-center gap-1.5">
                 <span className="text-amber-500">✦</span>
                 {tag}
               </span>
             ))}
-          </div>
+          </div> */}
         </div>
       </div>
 

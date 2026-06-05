@@ -24,7 +24,7 @@ const Slider: React.FC = () => {
       <div className="flex items-center justify-center gap-4 mb-7 px-6">
         <div className="h-px flex-1 max-w-[80px] bg-zinc-800" />
         <span className="text-[11px] font-mono tracking-[0.12em] uppercase text-zinc-600">
-          Built on top of
+          Popular Linux Distros
         </span>
         <div className="h-px flex-1 max-w-[80px] bg-zinc-800" />
       </div>
