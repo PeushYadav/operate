@@ -12,13 +12,190 @@ import { isRecommendSuccess } from "../lib/os/types";
 type Mode = "form" | "prompt";
 type Experience = "Beginner" | "Intermediate" | "Advanced";
 
+const playBuildCompleteChime = () => {
+  try {
+    const ctx = new AudioContext();
+    const now = ctx.currentTime;
+    const notes = [
+      { freq: 783.99, start: 0, dur: 0.45 },
+      { freq: 1046.5, start: 0.12, dur: 0.55 },
+    ];
+    for (const n of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = n.freq;
+      gain.gain.setValueAtTime(0, now + n.start);
+      gain.gain.linearRampToValueAtTime(0.25, now + n.start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + n.start);
+      osc.stop(now + n.start + n.dur);
+    }
+    setTimeout(() => void ctx.close(), 1500);
+  } catch {
+    // AudioContext may be blocked if the page has had no user interaction
+  }
+};
+
+const playBuildFailedTone = () => {
+  try {
+    const ctx = new AudioContext();
+    const now = ctx.currentTime;
+    // Descending minor-third pair (A4 → F4) with a soft square edge for a
+    // distinctly "wrong" colour vs. the success chime's bright sine major-third.
+    const notes = [
+      { freq: 440.0, start: 0, dur: 0.35 },
+      { freq: 349.23, start: 0.18, dur: 0.55 },
+    ];
+    for (const n of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.value = n.freq;
+      gain.gain.setValueAtTime(0, now + n.start);
+      gain.gain.linearRampToValueAtTime(0.15, now + n.start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + n.start + n.dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + n.start);
+      osc.stop(now + n.start + n.dur);
+    }
+    setTimeout(() => void ctx.close(), 1500);
+  } catch {
+    // AudioContext may be blocked if the page has had no user interaction
+  }
+};
+
+type BuildProgressCounts = {
+  reached: number;
+  downloaded: number;
+  installed: number;
+  total: number | null;
+};
+
+const EMPTY_PROGRESS: BuildProgressCounts = {
+  reached: 0,
+  downloaded: 0,
+  installed: 0,
+  total: null,
+};
+
 type BuildState = {
   id: string;
   status: BuildStatus;
   log: string;
+  progress: BuildProgressCounts;
+  startedAt?: number;
+  finishedAt?: number;
+  serverNow?: number;
   isoName?: string;
   error?: string;
 };
+
+// ── Build log → stage derivation ────────────────────────────────────────────
+// The raw mkarchiso/pacstrap log is a firehose; the UI shows a stage timeline
+// derived from stable marker lines instead, with the raw log collapsed behind
+// a toggle for debugging.
+
+type StageState = "pending" | "active" | "done" | "failed";
+
+const STAGE_DEFS: Array<{ label: string; marker: RegExp | null }> = [
+  { label: "Preparing build profile", marker: null }, // reached at job start
+  {
+    label: "Downloading & installing packages",
+    marker: /Synchronizing package databases|Packages \(\d+\)/,
+  },
+  // NB: our own "[operate] customize_airootfs.sh will enable" prep line must
+  // not trigger this — match mkarchiso's runtime message only.
+  { label: "Configuring system", marker: /Running customize_airootfs\.sh/ },
+  {
+    label: "Creating ISO image",
+    marker: /Creating SquashFS image|Creating EROFS image|Creating ISO image/,
+  },
+  // mkarchiso prints "Done!" after EVERY step, so the only unambiguous
+  // completion marker is our own log line from buildIso.ts
+  { label: "Finalizing", marker: /\[operate\] done:/ },
+];
+
+type DerivedStage = { label: string; state: StageState; detail?: string };
+
+// The job log is a ring buffer (server trims it to the last 150KB), so early
+// marker lines disappear mid-build. Callers must clamp these values to be
+// monotonically increasing across polls — see BuildProgress.
+function parseBuildLog(log: string): BuildProgressCounts {
+  let reached = 0;
+  for (let i = STAGE_DEFS.length - 1; i >= 1; i--) {
+    const m = STAGE_DEFS[i].marker;
+    if (m && m.test(log)) {
+      reached = i;
+      break;
+    }
+  }
+
+  // pacstrap progress: "Packages (247)" gives the total; during the download
+  // phase our XferCommand wrapper prints one "[operate-dl] x…" line per
+  // package, then the install phase prints one "installing x…" per package.
+  // (downloaded can undershoot total — cached packages skip the download.)
+  const totalMatch = log.match(/Packages \((\d+)\)/);
+  return {
+    reached,
+    downloaded: log.match(/^\[operate-dl\] /gm)?.length ?? 0,
+    installed: log.match(/^installing /gm)?.length ?? 0,
+    total: totalMatch ? Number(totalMatch[1]) : null,
+  };
+}
+
+function buildStageList(
+  reached: number,
+  status: BuildStatus,
+  pkgDetail?: string,
+): DerivedStage[] {
+  return STAGE_DEFS.map((def, i) => {
+    let state: StageState;
+    if (status === "done") state = "done";
+    else if (i < reached) state = "done";
+    else if (i === reached)
+      state = status === "failed" ? "failed" : "active";
+    else state = "pending";
+    return {
+      label: def.label,
+      state,
+      detail: i === 1 && state !== "pending" ? pkgDetail : undefined,
+    };
+  });
+}
+
+const formatElapsed = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
+};
+
+function StageIcon({ state }: { state: StageState }) {
+  if (state === "done")
+    return (
+      <span className="w-5 h-5 flex items-center justify-center rounded-full bg-emerald-500/15 text-emerald-400 text-[11px]">
+        ✓
+      </span>
+    );
+  if (state === "failed")
+    return (
+      <span className="w-5 h-5 flex items-center justify-center rounded-full bg-red-500/15 text-red-400 text-[11px]">
+        ✕
+      </span>
+    );
+  if (state === "active")
+    return (
+      <span className="w-5 h-5 flex items-center justify-center">
+        <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+      </span>
+    );
+  return (
+    <span className="w-5 h-5 flex items-center justify-center">
+      <span className="w-2.5 h-2.5 rounded-full border border-zinc-700" />
+    </span>
+  );
+}
 
 export default function NewBuilder() {
   const [mode, setMode] = useState<Mode>("form");
@@ -112,26 +289,51 @@ export default function NewBuilder() {
         id: "",
         status: "failed",
         log: "",
+        progress: EMPTY_PROGRESS,
         error: data.error ?? "Failed to start build",
       });
       return;
     }
-    setBuild({ id: data.id, status: data.status, log: "" });
+    setBuild({
+      id: data.id,
+      status: data.status,
+      log: "",
+      progress: EMPTY_PROGRESS,
+    });
 
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       const r = await fetch(`/api/build/${data.id}`);
       if (!r.ok) return;
       const j = await r.json();
-      setBuild({
-        id: j.id,
-        status: j.status,
-        log: j.log,
-        isoName: j.isoName,
-        error: j.error,
+      setBuild((prev) => {
+        // clamp progress to high-water marks: the server trims the log to its
+        // last 150KB, so early marker lines ("Packages (N)", stage markers)
+        // vanish mid-build and a raw re-parse would regress
+        const parsed = parseBuildLog(j.log);
+        const p =
+          prev && prev.id === j.id ? prev.progress : EMPTY_PROGRESS;
+        return {
+          id: j.id,
+          status: j.status,
+          log: j.log,
+          progress: {
+            reached: Math.max(p.reached, parsed.reached),
+            downloaded: Math.max(p.downloaded, parsed.downloaded),
+            installed: Math.max(p.installed, parsed.installed),
+            total: parsed.total ?? p.total,
+          },
+          startedAt: j.startedAt,
+          finishedAt: j.finishedAt,
+          serverNow: j.now,
+          isoName: j.isoName,
+          error: j.error,
+        };
       });
       if (j.status === "done" || j.status === "failed") {
         if (pollRef.current) clearInterval(pollRef.current);
+        if (j.status === "done") playBuildCompleteChime();
+        else playBuildFailedTone();
       }
     }, 1500);
   };
@@ -369,38 +571,134 @@ export default function NewBuilder() {
           </div>
         )}
 
-        {build && (
-          <div className="mt-6 bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-            <div className="flex items-baseline justify-between mb-3">
-              <h3 className="text-lg font-semibold">Build {build.id || "—"}</h3>
-              <span
-                className={`text-xs font-mono uppercase ${
-                  build.status === "done"
-                    ? "text-emerald-400"
-                    : build.status === "failed"
-                    ? "text-red-400"
-                    : "text-amber-400"
-                }`}
-              >
-                {build.status}
+        {build && <BuildProgress build={build} />}
+    </div>
+  );
+}
+
+function BuildProgress({ build }: { build: BuildState }) {
+  const [showLog, setShowLog] = useState(false);
+  const logRef = useRef<HTMLPreElement | null>(null);
+
+  // keep the raw log pinned to the bottom while it streams
+  useEffect(() => {
+    if (showLog && logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [showLog, build.log]);
+
+  const { reached, downloaded, installed, total } = build.progress;
+  // download phase first (counter from [operate-dl] lines), then install
+  // phase (counter from pacman's "installing …" lines)
+  const pkgDetail =
+    total !== null
+      ? installed > 0
+        ? `installing ${Math.min(installed, total)} / ${total}`
+        : `downloading ${Math.min(downloaded, total)} / ${total}`
+      : undefined;
+  const stages = buildStageList(reached, build.status, pkgDetail);
+  const pkgProgress =
+    total !== null && total > 0
+      ? Math.min(100, (Math.max(installed, downloaded) / total) * 100)
+      : null;
+  const elapsedEnd = build.finishedAt ?? build.serverNow;
+  const elapsed =
+    build.startedAt !== undefined && elapsedEnd !== undefined
+      ? formatElapsed(elapsedEnd - build.startedAt)
+      : null;
+
+  return (
+    <div className="mt-6 bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+      <div className="flex items-baseline justify-between mb-5">
+        <h3 className="text-lg font-semibold">
+          Build{" "}
+          <span className="font-mono text-sm text-zinc-400">
+            {build.id || "—"}
+          </span>
+        </h3>
+        <div className="flex items-baseline gap-3">
+          {elapsed && (
+            <span className="text-xs font-mono text-zinc-500">{elapsed}</span>
+          )}
+          <span
+            className={`text-xs font-mono uppercase ${
+              build.status === "done"
+                ? "text-emerald-400"
+                : build.status === "failed"
+                ? "text-red-400"
+                : "text-amber-400"
+            }`}
+          >
+            {build.status}
+          </span>
+        </div>
+      </div>
+
+      <ol className="space-y-3 mb-4">
+        {stages.map((stage) => (
+          <li key={stage.label} className="flex items-center gap-3">
+            <StageIcon state={stage.state} />
+            <span
+              className={`text-sm flex-1 ${
+                stage.state === "active"
+                  ? "text-zinc-100"
+                  : stage.state === "done"
+                  ? "text-zinc-400"
+                  : stage.state === "failed"
+                  ? "text-red-300"
+                  : "text-zinc-600"
+              }`}
+            >
+              {stage.label}
+            </span>
+            {stage.detail && (
+              <span className="text-xs font-mono text-zinc-500">
+                {stage.detail}
               </span>
-            </div>
-            {build.error && (
-              <p className="text-sm text-red-300 mb-3">{build.error}</p>
             )}
-            <pre className="text-xs bg-black border border-zinc-800 rounded-lg p-3 overflow-auto text-zinc-400 max-h-72 whitespace-pre-wrap">
-              {build.log || "Waiting for output..."}
-            </pre>
-            {build.status === "done" && build.id && (
-              <a
-                href={`/api/build/${build.id}/download`}
-                className="mt-4 block w-full text-center py-3 rounded-lg bg-amber-500 text-black font-semibold hover:bg-amber-400 transition"
-              >
-                Download {build.isoName ?? "operate.iso"}
-              </a>
-            )}
-          </div>
-        )}
+          </li>
+        ))}
+      </ol>
+
+      {pkgProgress !== null && build.status === "running" && (
+        <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden mb-4">
+          <div
+            className="h-full bg-amber-500 rounded-full transition-all duration-700"
+            style={{ width: `${pkgProgress}%` }}
+          />
+        </div>
+      )}
+
+      {build.error && (
+        <div className="p-3 mb-4 rounded-lg border border-red-900 bg-red-950/40 text-sm text-red-300">
+          {build.error}
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setShowLog((s) => !s)}
+        className="text-xs font-mono text-zinc-500 hover:text-zinc-300 transition"
+      >
+        {showLog ? "▾ hide raw log" : "▸ show raw log"}
+      </button>
+      {showLog && (
+        <pre
+          ref={logRef}
+          className="mt-2 text-xs bg-black border border-zinc-800 rounded-lg p-3 overflow-auto text-zinc-400 max-h-72 whitespace-pre-wrap"
+        >
+          {build.log || "Waiting for output..."}
+        </pre>
+      )}
+
+      {build.status === "done" && build.id && (
+        <a
+          href={`/api/build/${build.id}/download`}
+          className="mt-4 block w-full text-center py-3 rounded-lg bg-amber-500 text-black font-semibold hover:bg-amber-400 transition"
+        >
+          Download {build.isoName ?? "operate.iso"}
+        </a>
+      )}
     </div>
   );
 }

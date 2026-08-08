@@ -21,6 +21,22 @@ export const HYPRLAND_PACKAGES = [
   "pipewire-pulse",
   "wireplumber",
   "alsa-utils",
+  // GPU userspace + firmware. Without these the kernel has no working DRM
+  // driver and SDDM/Hyprland render to a black screen (see 2026-06-05 evening).
+  "mesa",
+  "linux-firmware",
+  "vulkan-icd-loader",
+  // SilentSDDM theme runtime deps (theme files are baked separately in buildIso.ts)
+  "qt6-svg",
+  "qt6-virtualkeyboard",
+  "qt6-multimedia-ffmpeg",
+  // Disk installer — invoked from the first-boot prompt when user picks "Install"
+  "archinstall",
+  // Look & feel: wallpaper daemon, lock screen, idle daemon, system-info greeter
+  "hyprpaper",
+  "hyprlock",
+  "hypridle",
+  "fastfetch",
 ];
 
 export const HYPRLAND_SERVICES = ["NetworkManager", "sddm"];
@@ -56,10 +72,13 @@ decoration {
         size = 4
         passes = 2
     }
-    drop_shadow = true
-    shadow_range = 6
-    shadow_render_power = 2
-    col.shadow = rgba(00000088)
+    # Hyprland >= 0.42 — drop_shadow/col.shadow were replaced by this block
+    shadow {
+        enabled = true
+        range = 6
+        render_power = 2
+        color = rgba(00000088)
+    }
 }
 
 animations {
@@ -70,14 +89,17 @@ animations {
     animation = workspaces, 1, 4, ease
 }
 
+# Hyprland >= 0.55 removed dwindle:pseudotile — pseudo is per-window now,
+# toggled by the \`pseudo\` dispatcher (Super + P below).
 dwindle {
-    pseudotile      = true
-    preserve_split  = true
+    preserve_split = true
 }
 
 # Autostart
 exec-once = waybar
 exec-once = mako
+exec-once = hyprpaper
+exec-once = hypridle
 exec-once = /usr/lib/polkit-kde-authentication-agent-1
 
 # Wayland-friendly env
@@ -91,6 +113,7 @@ $mod = SUPER
 bind = $mod, RETURN, exec, foot
 bind = $mod, K,      exec, operate-keybinds
 bind = $mod, D,      exec, wofi --show drun
+bind = $mod, L,      exec, hyprlock
 
 # === Window control ===
 bind = $mod, Q, killactive,
@@ -250,6 +273,7 @@ export const KEYBINDINGS_DOC = `╭───────────────
   Super + Enter          Open terminal (foot)
   Super + K              Show this help screen
   Super + D              App launcher (wofi)
+  Super + L              Lock screen (hyprlock)
 
   ─── Window control ───────────────────────────────────────────────
   Super + Q              Close focused window
@@ -280,6 +304,8 @@ export const KEYBINDINGS_DOC = `╭───────────────
   ─── Tips ─────────────────────────────────────────────────────────
   • Hyprland config:     ~/.config/hypr/hyprland.conf
   • Waybar config:       ~/.config/waybar/
+  • Wallpaper:           ~/.config/hypr/hyprpaper.conf
+  • Lock / idle:         ~/.config/hypr/hyprlock.conf, hypridle.conf
   • This help screen:    /etc/operate/keybindings.txt
   • Reload Hyprland:     hyprctl reload
 
@@ -288,4 +314,238 @@ export const KEYBINDINGS_DOC = `╭───────────────
 
 export const KEYBINDS_LAUNCHER_SCRIPT = `#!/bin/bash
 exec foot -T "Operate Keybindings" -e less /etc/operate/keybindings.txt
+`;
+
+export const WALLPAPER_PATH = "/usr/share/backgrounds/operate/wallpaper.png";
+
+export const HYPRPAPER_CONF = `preload = ${WALLPAPER_PATH}
+wallpaper = ,${WALLPAPER_PATH}
+splash = false
+`;
+
+export const HYPRLOCK_CONF = `# Operate — lock screen (Super + L)
+background {
+    monitor =
+    path = ${WALLPAPER_PATH}
+    blur_passes = 3
+    blur_size = 6
+    brightness = 0.6
+}
+
+input-field {
+    monitor =
+    size = 260, 46
+    outline_thickness = 2
+    dots_size = 0.25
+    dots_spacing = 0.25
+    outer_color = rgba(fbbf24aa)
+    inner_color = rgba(18181bee)
+    font_color = rgba(e4e4e7ff)
+    placeholder_text = <i>password…</i>
+    fail_text = <i>wrong — attempt $ATTEMPTS</i>
+    rounding = 8
+    position = 0, -40
+    halign = center
+    valign = center
+}
+
+label {
+    monitor =
+    text = $TIME
+    color = rgba(e4e4e7ff)
+    font_size = 72
+    font_family = JetBrains Mono
+    position = 0, 120
+    halign = center
+    valign = center
+}
+
+label {
+    monitor =
+    text = operate
+    color = rgba(fbbf24cc)
+    font_size = 14
+    font_family = JetBrains Mono
+    position = 0, 48
+    halign = center
+    valign = center
+}
+`;
+
+export const HYPRIDLE_CONF = `# Operate — idle behaviour
+general {
+    lock_cmd = pidof hyprlock || hyprlock
+    before_sleep_cmd = loginctl lock-session
+    after_sleep_cmd = hyprctl dispatch dpms on
+}
+
+# Lock after 10 minutes idle
+listener {
+    timeout = 600
+    on-timeout = loginctl lock-session
+}
+
+# Screen off after 15 minutes idle
+listener {
+    timeout = 900
+    on-timeout = hyprctl dispatch dpms off
+    on-resume = hyprctl dispatch dpms on
+}
+`;
+
+export const WOFI_CONFIG = `show=drun
+prompt=run
+width=560
+height=380
+allow_images=true
+image_size=24
+insensitive=true
+matching=fuzzy
+no_actions=true
+key_expand=Tab
+`;
+
+export const WOFI_STYLE = `* {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+}
+
+window {
+    background-color: rgba(24, 24, 27, 0.96);
+    border: 2px solid rgba(251, 191, 36, 0.55);
+    border-radius: 10px;
+}
+
+#input {
+    margin: 10px;
+    padding: 8px 12px;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    background-color: #27272a;
+    color: #e4e4e7;
+}
+#input:focus {
+    border-color: rgba(251, 191, 36, 0.7);
+}
+
+#inner-box,
+#outer-box {
+    margin: 0 6px 6px 6px;
+    background-color: transparent;
+    color: #d4d4d8;
+}
+
+#entry {
+    padding: 7px 10px;
+    border-radius: 8px;
+}
+#entry:selected {
+    background-color: rgba(251, 191, 36, 0.12);
+    color: #fbbf24;
+    outline: none;
+}
+#text:selected {
+    color: #fbbf24;
+}
+`;
+
+export const FOOT_CONFIG = `# Operate — foot terminal
+font=JetBrains Mono:size=11
+pad=12x12
+
+[cursor]
+style=beam
+blink=yes
+
+[colors]
+alpha=0.94
+background=131316
+foreground=d4d4d8
+
+# zinc-flavoured dark palette with an amber accent
+regular0=27272a
+regular1=f87171
+regular2=4ade80
+regular3=fbbf24
+regular4=60a5fa
+regular5=c084fc
+regular6=22d3ee
+regular7=d4d4d8
+
+bright0=3f3f46
+bright1=fca5a5
+bright2=86efac
+bright3=fcd34d
+bright4=93c5fd
+bright5=d8b4fe
+bright6=67e8f9
+bright7=fafafa
+
+selection-background=fbbf24
+selection-foreground=18181b
+`;
+
+export const MAKO_CONFIG = `# Operate — notifications
+font=JetBrains Mono 11
+background-color=#18181bf2
+text-color=#e4e4e7
+border-color=#fbbf2488
+border-size=2
+border-radius=10
+padding=12
+default-timeout=6000
+max-visible=4
+anchor=top-right
+margin=12
+
+[urgency=critical]
+border-color=#f87171
+default-timeout=0
+`;
+
+export const OPERATE_LOGO_ASCII = `   ____  ____  ___  _________ _/ /____
+  / __ \\/ __ \\/ _ \\/ ___/ __ \`/ __/ _ \\
+ / /_/ / /_/ /  __/ /  / /_/ / /_/  __/
+ \\____/ .___/\\___/_/   \\__,_/\\__/\\___/
+     /_/
+`;
+
+export const FASTFETCH_CONFIG = `{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    "logo": {
+        "source": "/etc/operate/logo.txt",
+        "type": "file",
+        "color": { "1": "yellow" },
+        "padding": { "top": 1, "right": 3 }
+    },
+    "display": {
+        "separator": "  ",
+        "color": { "keys": "yellow" }
+    },
+    "modules": [
+        { "type": "title", "format": "{user-name}@{host-name}" },
+        { "type": "os", "key": "os" },
+        { "type": "kernel", "key": "kernel" },
+        { "type": "wm", "key": "wm" },
+        { "type": "uptime", "key": "uptime" },
+        { "type": "packages", "key": "pkgs" },
+        { "type": "memory", "key": "mem" },
+        { "type": "colors", "symbol": "circle" }
+    ]
+}
+`;
+
+export const SKEL_BASHRC = `# Operate — default shell setup
+[[ $- != *i* ]] && return
+
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias grep='grep --color=auto'
+alias keys='operate-keybinds'
+
+# amber user@host, zinc path
+PS1='\\[\\e[1;33m\\]\\u@\\h\\[\\e[0m\\] \\[\\e[90m\\]\\w\\[\\e[0m\\] \\[\\e[1;33m\\]›\\[\\e[0m\\] '
+
+# system greeting on new terminals
+command -v fastfetch >/dev/null && fastfetch
 `;

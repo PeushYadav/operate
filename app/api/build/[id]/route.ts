@@ -18,6 +18,9 @@ export async function GET(
     log: job.log,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
+    // server clock, so the client can show elapsed time without trusting
+    // (or polling) its own clock
+    now: Date.now(),
     isoName: job.isoName,
     error: job.error,
   });

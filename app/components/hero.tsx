@@ -35,44 +35,38 @@ const Hero = () => {
       <div className="relative z-10 flex min-h-screen items-center justify-center px-6 py-24">
         <div className="max-w-4xl w-full">
 
-          {/* Eyebrow tag */}
-          <div className="inline-flex items-center gap-2 mb-8 px-3 py-1 rounded-full border border-zinc-700 bg-zinc-900/60 backdrop-blur-sm">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-            <span className="text-xs font-mono tracking-widest text-zinc-400 uppercase">
-              Custom Linux Distros
-            </span>
-          </div>
+          {/* Eyebrow */}
+          <p className="text-xs tracking-[0.2em] uppercase text-zinc-500 font-mono mb-4">
+            {"// Custom Linux Distros"}
+          </p>
 
           {/* Headline */}
-          <h1 className="font-['Syne',_sans-serif] text-5xl sm:text-6xl lg:text-7xl font-bold leading-[1.05] tracking-tight text-white mb-4">
+          <h1 className="text-5xl sm:text-6xl lg:text-7xl font-serif leading-[1.05] text-white mb-8">
             <span className="block">Operate —</span>
-            <span className="block text-zinc-400 font-light">Linux, built for</span>
+            <span className="block text-zinc-400">Linux, built for</span>
             <span className="block">
               your{" "}
               <span
                 className={`
-                  inline-block text-amber-400 transition-all duration-300
+                  inline-block italic text-zinc-400 transition-all duration-300
                   ${visible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2"}
                 `}
               >
                 {ROTATING_WORDS[index]}
               </span>
-              <span className="text-amber-400">.</span>
+              <span className="italic text-zinc-400">.</span>
             </span>
           </h1>
 
-          {/* Divider */}
-          <div className="flex items-center gap-4 my-8">
-            <div className="h-px flex-1 max-w-[60px] bg-amber-400/50" />
-            <div className="h-px flex-1 bg-zinc-800" />
-          </div>
-
           {/* Body copy */}
-          <p className="text-base sm:text-lg text-zinc-400 leading-relaxed max-w-2xl mb-10">
-            Describe what you need — development, design, cybersecurity, AI, or everyday
-            productivity — and we build a custom Linux distribution optimized specifically
-            for you. Pre-installed tools, tuned performance, and an interface that works
-            exactly the way you do.
+          <p className="text-sm text-zinc-400 max-w-md leading-relaxed mb-10">
+            Tell us how you work. We hand you a Linux that already gets it —
+            packages picked, environment ready on first boot. No three-day setup,
+            no forum-diving.
+            <span className="block mt-3 text-zinc-500">
+              Starting with Arch + Hyprland. Ricing presets, more desktops, and
+              bootloader choice landing next.
+            </span>
           </p>
 
           {/* CTA row */}

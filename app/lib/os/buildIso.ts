@@ -6,6 +6,7 @@ import {
   readdir,
   writeFile,
   cp,
+  rm,
   symlink,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -19,13 +20,25 @@ import {
   WAYBAR_STYLE,
   KEYBINDINGS_DOC,
   KEYBINDS_LAUNCHER_SCRIPT,
+  HYPRPAPER_CONF,
+  HYPRLOCK_CONF,
+  HYPRIDLE_CONF,
+  WOFI_CONFIG,
+  WOFI_STYLE,
+  FOOT_CONFIG,
+  MAKO_CONFIG,
+  FASTFETCH_CONFIG,
+  OPERATE_LOGO_ASCII,
+  SKEL_BASHRC,
 } from "./hyprland";
+import {
+  firstbootScript,
+  FIRSTBOOT_SERVICE_UNIT,
+  ADOPT_SCRIPT,
+} from "./firstboot";
+import { buildArchinstallPreseed } from "./archinstallPreseed";
 
-const DEFAULT_PASSWORD = "operate";
 const DM_NAMES = new Set(["sddm", "gdm", "lightdm", "ly", "lxdm"]);
-const OPERATE_UID = 1000;
-const OPERATE_GID = 1000;
-const WHEEL_GID = 998;
 
 const DESKTOP_SESSIONS: Record<string, string> = {
   hyprland: "hyprland.desktop",
@@ -52,6 +65,11 @@ const BUILD_ROOT =
   process.env.OPERATE_BUILD_ROOT ??
   path.join(homedir(), ".cache", "operate-builds");
 
+const SILENT_SDDM_VERSION = "v1.4.2";
+const SILENT_SDDM_TARBALL_URL = `https://api.github.com/repos/uiriansan/SilentSDDM/tarball/${SILENT_SDDM_VERSION}`;
+const ASSETS_DIR = path.join(BUILD_ROOT, "_assets");
+const PKG_CACHE_DIR = path.join(BUILD_ROOT, "_pkgcache");
+
 type JobStore = Map<string, BuildJob>;
 
 declare global {
@@ -68,11 +86,94 @@ export const listJobs = () => Array.from(jobs.values());
 
 const newJobId = () => randomBytes(6).toString("hex");
 
+// pacman flags a corrupted cached package on two lines — the error names the
+// package, the ":: File" line names the exact cache file:
+//   error: linux: signature from "..." is invalid
+//   :: File /…/_pkgcache/linux-7.1.3.arch1-3-x86_64.pkg.tar.zst is corrupted
+//      (invalid or corrupted package (PGP signature)).
+function findCorruptCachedPackages(log: string): string[] {
+  const names = new Set<string>();
+  for (const m of log.matchAll(
+    /^:: File (\S+\.pkg\.tar\.\w+) is corrupted/gim,
+  )) {
+    names.add(path.basename(m[1]));
+  }
+  for (const m of log.matchAll(
+    /^error:\s+([^\s:]+):\s+signature from .* is invalid/gim,
+  )) {
+    names.add(m[1]);
+  }
+  return [...names];
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// A build killed mid-download leaves *.part files (and, rarely, a fully
+// renamed but truncated .pkg) in the shared cache. Sweep the .part debris
+// before each build; corrupted full packages are handled reactively by
+// deleteCorruptCachedPackages when pacman flags them.
+async function sweepStalePartFiles(job: BuildJob) {
+  if (!existsSync(PKG_CACHE_DIR)) return;
+  const parts = (await readdir(PKG_CACHE_DIR)).filter((f) =>
+    f.endsWith(".part"),
+  );
+  if (!parts.length) return;
+  for (const f of parts) {
+    await rm(path.join(PKG_CACHE_DIR, f), { force: true });
+  }
+  appendLog(
+    job,
+    `[operate] removed ${parts.length} stale partial download(s) from package cache: ${parts.join(", ")}\n`,
+  );
+}
+
+async function deleteCorruptCachedPackages(names: string[], job: BuildJob) {
+  if (!names.length || !existsSync(PKG_CACHE_DIR)) return;
+  const cached = await readdir(PKG_CACHE_DIR);
+  const victims = new Set<string>();
+  for (const name of names) {
+    // basename only — never let a log-derived string traverse paths
+    const base = path.basename(name);
+    // `base` is either an exact cache filename (from ":: File …" lines) or a
+    // bare pkgname (from "error: …" lines) — match the latter against cached
+    // "<pkgname>-<version>" files, requiring a digit/epoch right after the
+    // name so e.g. "linux" can't sweep up linux-firmware
+    const asPkgname = new RegExp(`^${escapeRegExp(base)}-[0-9]`);
+    for (const f of cached) {
+      if (f === base || f === `${base}.sig` || asPkgname.test(f)) {
+        victims.add(f);
+      }
+    }
+  }
+  for (const f of victims) {
+    await rm(path.join(PKG_CACHE_DIR, f), { force: true });
+  }
+  if (victims.size) {
+    appendLog(
+      job,
+      `[operate] deleted corrupted cached package file(s): ${[...victims].join(", ")}\n`,
+    );
+  }
+}
+
 function diagnoseFailure(rawError: string, log: string): string {
+  // "signature from X is invalid" on a NAMED .pkg file is almost always a
+  // corrupted file in our shared package cache (e.g. a build killed
+  // mid-download), NOT a stale keyring — check for it first. startBuild
+  // deletes the named files on failure so the next build self-heals.
+  const corrupt = findCorruptCachedPackages(log);
+  if (corrupt.length) {
+    return (
+      `Corrupted package file(s) in the build cache failed signature verification: ` +
+      `${corrupt.join(", ")}. They have been deleted from ${PKG_CACHE_DIR} — ` +
+      `retry the build (it will re-download them). If this repeats, clear the ` +
+      `whole cache directory.`
+    );
+  }
   if (
-    /signature from .* is invalid/i.test(log) ||
-    /corrupted.*PGP signature/i.test(log) ||
-    /key .* is unknown/i.test(log)
+    /key .* is unknown/i.test(log) ||
+    /key .* could not be looked up remotely/i.test(log) ||
+    /signature from .* is (unknown trust|marginal trust)/i.test(log)
   ) {
     return "Host archlinux-keyring is out of date — pacstrap can't verify package signatures. On the host running the build, run: sudo pacman -Sy archlinux-keyring (or a full sudo pacman -Syu).";
   }
@@ -167,112 +268,296 @@ async function writeIssueBanner(profileDir: string) {
 
 async function applyHyprlandDefaults(profileDir: string) {
   const airoot = path.join(profileDir, "airootfs");
-  const skelHypr = path.join(airoot, "etc", "skel", ".config", "hypr");
-  const skelWaybar = path.join(airoot, "etc", "skel", ".config", "waybar");
+  const skel = path.join(airoot, "etc", "skel");
+  const skelConfig = path.join(skel, ".config");
   const etcOperate = path.join(airoot, "etc", "operate");
   const localBin = path.join(airoot, "usr", "local", "bin");
+  const etcDir = path.join(airoot, "etc");
+  const wallpaperDir = path.join(
+    airoot,
+    "usr",
+    "share",
+    "backgrounds",
+    "operate",
+  );
 
-  await mkdir(skelHypr, { recursive: true });
-  await mkdir(skelWaybar, { recursive: true });
+  // dotfiles baked into /etc/skel — every skel entry is a
+  // [relative path, content] pair; hypr/waybar/wofi/foot/mako/fastfetch all
+  // follow the same amber-on-zinc identity as the web UI
+  const skelFiles: Array<[string, string]> = [
+    ["hypr/hyprland.conf", HYPRLAND_CONF],
+    ["hypr/hyprpaper.conf", HYPRPAPER_CONF],
+    ["hypr/hyprlock.conf", HYPRLOCK_CONF],
+    ["hypr/hypridle.conf", HYPRIDLE_CONF],
+    ["waybar/config", WAYBAR_CONFIG],
+    ["waybar/style.css", WAYBAR_STYLE],
+    ["wofi/config", WOFI_CONFIG],
+    ["wofi/style.css", WOFI_STYLE],
+    ["foot/foot.ini", FOOT_CONFIG],
+    ["mako/config", MAKO_CONFIG],
+    ["fastfetch/config.jsonc", FASTFETCH_CONFIG],
+  ];
+  for (const [rel, content] of skelFiles) {
+    const target = path.join(skelConfig, rel);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, content);
+  }
+  await writeFile(path.join(skel, ".bashrc"), SKEL_BASHRC);
+
   await mkdir(etcOperate, { recursive: true });
   await mkdir(localBin, { recursive: true });
+  await mkdir(wallpaperDir, { recursive: true });
 
-  await writeFile(path.join(skelHypr, "hyprland.conf"), HYPRLAND_CONF);
-  await writeFile(path.join(skelWaybar, "config"), WAYBAR_CONFIG);
-  await writeFile(path.join(skelWaybar, "style.css"), WAYBAR_STYLE);
   await writeFile(path.join(etcOperate, "keybindings.txt"), KEYBINDINGS_DOC);
+  await writeFile(path.join(etcOperate, "logo.txt"), OPERATE_LOGO_ASCII);
   await writeFile(
     path.join(localBin, "operate-keybinds"),
     KEYBINDS_LAUNCHER_SCRIPT,
     { mode: 0o755 },
   );
+
+  // wallpaper is a committed repo asset (app/lib/os/assets/wallpaper.png) so
+  // build hosts don't need ImageMagick
+  const wallpaperSrc = path.join(
+    process.cwd(),
+    "app",
+    "lib",
+    "os",
+    "assets",
+    "wallpaper.png",
+  );
+  if (existsSync(wallpaperSrc)) {
+    await cp(wallpaperSrc, path.join(wallpaperDir, "wallpaper.png"));
+  }
+
+  // Live ISOs land in VMs by default (VirtualBox/VMware/etc.), where vmwgfx is
+  // commonly broken on the hypervisor and DRM init fails. Without these env
+  // vars wlroots refuses to start → Hyprland exits in <1s → SDDM relaunches →
+  // login loop with no visible error. ALLOW_SOFTWARE only kicks in when no
+  // hardware renderer is available, so this is a no-op on real GPUs.
+  // /etc/environment is read by PAM (sddm-helper), so the vars are present
+  // before Hyprland's renderer init — config's `env =` lines are too late.
+  await writeFile(
+    path.join(etcDir, "environment"),
+    "WLR_RENDERER_ALLOW_SOFTWARE=1\nWLR_NO_HARDWARE_CURSORS=1\n",
+  );
 }
 
-function hashPassword(plain: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const salt = randomBytes(8)
-      .toString("base64")
-      .replace(/[+/=]/g, "")
-      .slice(0, 16);
-    const child = spawn("openssl", ["passwd", "-6", "-salt", salt, plain]);
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (b: Buffer) => (out += b.toString()));
-    child.stderr.on("data", (b: Buffer) => (err += b.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve(out.trim());
-      else
-        reject(
-          new Error(
-            `openssl passwd -6 failed (exit ${code}): ${err.trim() || out.trim()}`,
-          ),
-        );
-    });
-  });
-}
-
-async function bakeUserAndAutologin(
+async function bakeFirstboot(
   profileDir: string,
-  username: string,
   desktop: string,
   job: BuildJob,
 ) {
-  const airootEtc = path.join(profileDir, "airootfs", "etc");
-  await mkdir(airootEtc, { recursive: true });
+  const airoot = path.join(profileDir, "airootfs");
+  const localBin = path.join(airoot, "usr", "local", "bin");
+  const systemdSystem = path.join(airoot, "etc", "systemd", "system");
 
-  const [rootHash, userHash] = await Promise.all([
-    hashPassword(DEFAULT_PASSWORD),
-    hashPassword(DEFAULT_PASSWORD),
-  ]);
+  await mkdir(localBin, { recursive: true });
+  await mkdir(systemdSystem, { recursive: true });
 
-  // Days since epoch — shadow(5) "last password change" field
-  const today = Math.floor(Date.now() / 86_400_000);
+  const session = DESKTOP_SESSIONS[desktop] ?? "hyprland.desktop";
 
   await writeFile(
-    path.join(airootEtc, "passwd"),
-    `root:x:0:0:root:/root:/bin/bash\n` +
-      `${username}:x:${OPERATE_UID}:${OPERATE_GID}:Operate User:/home/${username}:/bin/bash\n`,
+    path.join(localBin, "operate-firstboot"),
+    firstbootScript(session),
+    { mode: 0o755 },
+  );
+  await writeFile(
+    path.join(systemdSystem, "operate-firstboot.service"),
+    FIRSTBOOT_SERVICE_UNIT,
   );
 
-  await writeFile(
-    path.join(airootEtc, "shadow"),
-    `root:${rootHash}:${today}:0:99999:7:::\n` +
-      `${username}:${userHash}:${today}:0:99999:7:::\n`,
+  // Service enablement happens via customize_airootfs.sh — preset files are
+  // not auto-applied by mkarchiso or at first boot.
+
+  appendLog(
+    job,
+    `[operate] first-boot interactive setup installed (script + service; session=${session})\n`,
   );
+}
+
+async function writeCustomizeAirootfs(
+  profileDir: string,
+  services: string[],
+  hasFirstboot: boolean,
+  job: BuildJob,
+) {
+  const airoot = path.join(profileDir, "airootfs");
+  const rootDir = path.join(airoot, "root");
+  await mkdir(rootDir, { recursive: true });
+
+  const units = new Set<string>();
+  if (hasFirstboot) units.add("operate-firstboot.service");
+  for (const s of services) {
+    units.add(s.endsWith(".service") ? s : `${s}.service`);
+  }
+
+  // mkarchiso auto-runs /root/customize_airootfs.sh inside arch-chroot during
+  // build (see /usr/bin/mkarchiso ~L409). We use it for:
+  //
+  // 1. systemctl-enable services properly (creates *.target.wants/ symlinks
+  //    AND aliases like display-manager.service that preset files alone don't).
+  // 2. Initialize and populate the pacman keyring — stock Arch ISOs do this
+  //    at first boot via pacman-init.service; doing it at build time means
+  //    archinstall can pacstrap-to-disk on first boot without silently
+  //    failing every package's signature verification.
+  // 3. Write a real /etc/pacman.d/mirrorlist — the one shipped by the
+  //    pacman-mirrorlist package has every Server line commented out, so
+  //    archinstall's pacstrap step has nowhere to fetch from. The geo
+  //    mirror routes to whichever official mirror is closest; the others
+  //    are widely-distributed fallbacks.
+  // 4. Generate the en_US.UTF-8 locale so archinstall (Python) doesn't crash
+  //    on setlocale() before it even draws the TUI.
+  // 5. Disable the baseline's competing network/DNS managers (systemd-networkd,
+  //    systemd-resolved, cloud-init) so NetworkManager owns the link and DNS.
+  //    Without this, /etc/resolv.conf stays a stub and pacman can't resolve
+  //    mirror hostnames — archinstall dies fetching core.db / extra.db.
+  const script =
+    "#!/bin/bash\n" +
+    "set -e\n" +
+    "\n" +
+    "pacman-key --init\n" +
+    "pacman-key --populate archlinux\n" +
+    "\n" +
+    "cat > /etc/pacman.d/mirrorlist <<'MIRRORS'\n" +
+    "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n" +
+    "Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch\n" +
+    "Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch\n" +
+    "Server = https://mirror.leaseweb.net/archlinux/$repo/os/$arch\n" +
+    "Server = https://mirror.osbeck.com/archlinux/$repo/os/$arch\n" +
+    "Server = https://mirrors.mit.edu/archlinux/$repo/os/$arch\n" +
+    "MIRRORS\n" +
+    "\n" +
+    "# archinstall's pacstrap-to-disk runs with the live env's /etc/pacman.conf.\n" +
+    "# On VM NAT links (a few MiB/s total) the stock ParallelDownloads=5 starves\n" +
+    "# individual streams below pacman's hard low-speed cutoff (1 byte/s over\n" +
+    "# 10s) and downloads die with 'Operation too slow', taking the whole\n" +
+    "# install transaction with them. Two streams keep both fed;\n" +
+    "# DisableDownloadTimeout removes the cutoff entirely for slow-but-alive\n" +
+    "# mirrors.\n" +
+    "sed -i 's/^ParallelDownloads.*/ParallelDownloads = 2/' /etc/pacman.conf\n" +
+    "grep -q '^DisableDownloadTimeout' /etc/pacman.conf || sed -i '/^\\[options\\]/a DisableDownloadTimeout' /etc/pacman.conf\n" +
+    "\n" +
+    "# /etc/locale.conf says LANG=en_US.UTF-8 but the locale isn't actually\n" +
+    "# generated yet (locale.gen ships all-commented). archinstall is Python\n" +
+    "# and calls locale.setlocale() at startup — without this it dies before\n" +
+    "# even drawing its TUI. Uncomment en_US.UTF-8 and run locale-gen.\n" +
+    "sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen\n" +
+    "locale-gen\n" +
+    "\n" +
+    "# Live ISO networking: NetworkManager is the only stack we want — firstboot\n" +
+    "# uses nmtui, and we already pull in 'networkmanager' via the package list.\n" +
+    "# The archiso baseline ALSO enables systemd-networkd + systemd-resolved AND\n" +
+    "# wires cloud-init's target, so three managers race for the link and\n" +
+    "# /etc/resolv.conf stays a 65-byte stub. DNS silently fails in the live env,\n" +
+    "# so archinstall's `pacman -Sy` can't resolve mirrors and dies with\n" +
+    "# 'failed to retrieve core.db / extra.db'. Disable the extras, then tell NM\n" +
+    "# to own /etc/resolv.conf as a regular file. (rc-manager=file means NM\n" +
+    "# overwrites whatever's there on connection, so we leave the stub in place\n" +
+    "# — we can't `rm` it here anyway, mkarchiso bind-mounts the host's\n" +
+    "# resolv.conf into the chroot for pacstrap and the bind returns EBUSY.)\n" +
+    "systemctl disable systemd-networkd.service systemd-networkd.socket systemd-resolved.service\n" +
+    "systemctl mask systemd-networkd-wait-online.service\n" +
+    "systemctl disable cloud-init.target cloud-config.service cloud-final.service cloud-init-local.service cloud-init-main.service cloud-init-network.service 2>/dev/null || true\n" +
+    "rm -f /etc/systemd/network/20-ethernet.network\n" +
+    "mkdir -p /etc/NetworkManager/conf.d\n" +
+    "cat > /etc/NetworkManager/conf.d/10-operate.conf <<'NMCONF'\n" +
+    "[main]\n" +
+    "dns=default\n" +
+    "rc-manager=file\n" +
+    "NMCONF\n" +
+    "\n" +
+    [...units].map((u) => `systemctl enable ${u}`).join("\n") +
+    "\n";
+
+  await writeFile(path.join(rootDir, "customize_airootfs.sh"), script, {
+    mode: 0o755,
+  });
+
+  appendLog(
+    job,
+    `[operate] customize_airootfs.sh will enable: ${[...units].join(", ")}\n`,
+  );
+}
+
+async function downloadSilentSddmTarball(job: BuildJob): Promise<string> {
+  const tarballPath = path.join(
+    ASSETS_DIR,
+    `silent-sddm-${SILENT_SDDM_VERSION}.tar.gz`,
+  );
+  if (existsSync(tarballPath)) {
+    appendLog(job, `[operate] using cached SilentSDDM tarball: ${tarballPath}\n`);
+    return tarballPath;
+  }
+  await mkdir(ASSETS_DIR, { recursive: true });
+  appendLog(
+    job,
+    `[operate] downloading SilentSDDM ${SILENT_SDDM_VERSION} → ${tarballPath}\n`,
+  );
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("curl", [
+      "-fsSL",
+      "-o",
+      tarballPath,
+      SILENT_SDDM_TARBALL_URL,
+    ]);
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`curl exited with ${code} downloading SilentSDDM`));
+    });
+  });
+  return tarballPath;
+}
+
+async function bakeSilentSddmTheme(profileDir: string, job: BuildJob) {
+  const tarballPath = await downloadSilentSddmTarball(job);
+
+  const airoot = path.join(profileDir, "airootfs");
+  const themeDir = path.join(airoot, "usr", "share", "sddm", "themes", "silent");
+  const fontsDir = path.join(airoot, "usr", "share", "fonts", "silent-theme");
+  const sddmConfD = path.join(airoot, "etc", "sddm.conf.d");
+
+  await mkdir(themeDir, { recursive: true });
+  await mkdir(fontsDir, { recursive: true });
+  await mkdir(sddmConfD, { recursive: true });
+
+  // GitHub tarballs wrap contents in a `<user>-<repo>-<sha>/` folder.
+  // --strip-components=1 unwraps it so files land directly in themeDir.
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("tar", [
+      "-xzf",
+      tarballPath,
+      "-C",
+      themeDir,
+      "--strip-components=1",
+    ]);
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`tar exited with ${code} extracting SilentSDDM`));
+    });
+  });
+
+  const themeFontsSrc = path.join(themeDir, "fonts");
+  if (existsSync(themeFontsSrc)) {
+    await cp(themeFontsSrc, fontsDir, { recursive: true });
+  }
 
   await writeFile(
-    path.join(airootEtc, "group"),
-    `root:x:0:\n` +
-      `wheel:x:${WHEEL_GID}:${username}\n` +
-      `${username}:x:${OPERATE_GID}:\n`,
-  );
-
-  await writeFile(
-    path.join(airootEtc, "gshadow"),
-    `root:!*::\n` +
-      `wheel:!::${username}\n` +
-      `${username}:!::\n`,
+    path.join(sddmConfD, "10-theme.conf"),
+    `[General]\n` +
+      `InputMethod=qtvirtualkeyboard\n` +
+      `GreeterEnvironment=QML2_IMPORT_PATH=/usr/share/sddm/themes/silent/components/,QT_IM_MODULE=qtvirtualkeyboard\n` +
+      `\n` +
+      `[Theme]\n` +
+      `Current=silent\n`,
   );
 
   appendLog(
     job,
-    `[operate] baked ${username} (uid ${OPERATE_UID}, wheel) into airootfs /etc/{passwd,shadow,group,gshadow}\n`,
+    `[operate] SilentSDDM ${SILENT_SDDM_VERSION} theme + fonts + sddm.conf baked into airootfs\n`,
   );
-
-  const session = DESKTOP_SESSIONS[desktop];
-  if (session) {
-    const sddmDir = path.join(airootEtc, "sddm.conf.d");
-    await mkdir(sddmDir, { recursive: true });
-    await writeFile(
-      path.join(sddmDir, "autologin.conf"),
-      `[Autologin]\nUser=${username}\nSession=${session}\n`,
-    );
-    appendLog(
-      job,
-      `[operate] SDDM autologin configured → ${username} → ${session}\n`,
-    );
-  }
 }
 
 async function prepareProfile(
@@ -296,8 +581,11 @@ async function prepareProfile(
     .map((l) => l.trim())
     .filter(Boolean);
 
+  // networkmanager is pinned explicitly: customize_airootfs.sh enables
+  // NetworkManager.service, and the LLM's package list doesn't reliably
+  // include the package itself.
   const requested = Array.from(
-    new Set([...existing, config.kernel, ...config.packages]),
+    new Set([...existing, config.kernel, ...config.packages, "networkmanager"]),
   );
   const remapped: string[] = [];
   const substitutions: string[] = [];
@@ -315,8 +603,21 @@ async function prepareProfile(
   const checks = await Promise.all(
     deduped.map(async (p) => ({ p, ok: await checkPackage(p) })),
   );
+  const validMap = new Map(checks.map((c) => [c.p, c.ok]));
   const valid = checks.filter((c) => c.ok).map((c) => c.p);
   const dropped = checks.filter((c) => !c.ok).map((c) => c.p);
+
+  // What archinstall installs on the DISK: the user's validated package set
+  // (+ networkmanager), but none of the live-ISO plumbing from the baseline
+  // profile (cloud-init, mkinitcpio-archiso, guest agents…). The kernel is
+  // handled by the preseed's `kernels` key.
+  const targetPackages = Array.from(
+    new Set(
+      [...config.packages, "networkmanager"]
+        .map((p) => PROVIDER_MAP[p] ?? p)
+        .filter((p) => validMap.get(p) === true),
+    ),
+  ).sort();
 
   if (substitutions.length) {
     appendLog(
@@ -339,6 +640,51 @@ async function prepareProfile(
     /#\[multilib\]\s*\n#Include\s*=\s*\/etc\/pacman\.d\/mirrorlist/,
     "[multilib]\nInclude = /etc/pacman.d/mirrorlist",
   );
+  // pacman 7.x: disable the landlock download sandbox AND serialize downloads.
+  // The sandbox + parallel-download combo races on rename(<pkg>.part, <pkg>),
+  // leaving one worker to fail with ENOENT after another already committed the
+  // file. Both knobs together are the stable fix for mkarchiso on pacman 7.x.
+  pacmanConf = pacmanConf.replace(/^#DisableSandbox\s*$/m, "DisableSandbox");
+  pacmanConf = pacmanConf.replace(
+    /^ParallelDownloads\s*=\s*\d+\s*$/m,
+    "ParallelDownloads = 1",
+  );
+  // Use a dedicated package cache so a build never reuses a corrupted .pkg
+  // left behind in the host's /var/cache/pacman/pkg/ by an earlier failed run.
+  // pacman silently keeps such files under --noconfirm and they re-fail every
+  // subsequent build with "signature is invalid".
+  await mkdir(PKG_CACHE_DIR, { recursive: true });
+  pacmanConf = pacmanConf.replace(
+    /^#CacheDir\s*=.*$/m,
+    `CacheDir = ${PKG_CACHE_DIR}/`,
+  );
+  // Even with sandbox off and serial downloads, pacman 7.x's in-tree downloader
+  // intermittently emits "rename <pkg>.part to <pkg> (No such file or directory)"
+  // on the first download of a build — curl errors out, the .part gets cleaned
+  // up, then the rename runs anyway. Shelling out to curl via XferCommand
+  // sidesteps the whole .part/rename dance: curl writes directly to %o.
+  // The wrapper echoes one "[operate-dl] <pkg>" line per package so the build
+  // log (and the UI's package counter) moves during the download phase —
+  // curl itself stays -sS because its progress meter floods the log at one
+  // line per 100ms, but errors stay on stderr so failures still surface.
+  // Fetches of .sig/.db files are not logged (they'd double the noise).
+  const fetchScript = path.join(ASSETS_DIR, "pacman-fetch.sh");
+  await mkdir(ASSETS_DIR, { recursive: true });
+  await writeFile(
+    fetchScript,
+    "#!/bin/bash\n" +
+      'out="$1" url="$2"\n' +
+      'name="${url##*/}"\n' +
+      'case "$name" in\n' +
+      '  *.pkg.tar.zst|*.pkg.tar.xz) echo "[operate-dl] $name" ;;\n' +
+      "esac\n" +
+      'exec /usr/bin/curl -L -C - -f -sS -o "$out" "$url" --retry 3 --retry-delay 2 --max-time 600\n',
+    { mode: 0o755 },
+  );
+  pacmanConf = pacmanConf.replace(
+    /^#XferCommand\s*=\s*\/usr\/bin\/curl[^\n]*$/m,
+    `XferCommand = ${fetchScript} %o %u`,
+  );
   await writeFile(pacmanConfPath, pacmanConf);
 
   const etc = path.join(profileDir, "airootfs", "etc");
@@ -355,18 +701,7 @@ async function prepareProfile(
     `KEYMAP=${config.keymap}\n`,
   );
 
-  const presetDir = path.join(etc, "systemd", "system-preset");
-  await mkdir(presetDir, { recursive: true });
-  const presetLines = config.services.map((s) => {
-    const unit = s.endsWith(".service") ? s : `${s}.service`;
-    return `enable ${unit}`;
-  });
-  await writeFile(
-    path.join(presetDir, "10-operate.preset"),
-    presetLines.join("\n") + "\n",
-  );
-
-  const username = sanitize(config.username, "operate");
+  await writeCustomizeAirootfs(profileDir, config.services, true, job);
 
   const motd =
     `Welcome to your Operate-built Arch Linux ISO.\n` +
@@ -376,13 +711,35 @@ async function prepareProfile(
     `Desktop:  ${config.desktop}\n` +
     `Kernel:   ${config.kernel}\n` +
     `\n` +
-    `Login: root  or  ${username}    Password: ${DEFAULT_PASSWORD}\n`;
+    `On first boot you'll be prompted to install Operate or set up a live user.\n`;
   await writeFile(path.join(etc, "motd"), motd);
 
   const systemdSystem = path.join(etc, "systemd", "system");
   await mkdir(systemdSystem, { recursive: true });
 
-  await bakeUserAndAutologin(profileDir, username, config.desktop, job);
+  await bakeFirstboot(profileDir, config.desktop, job);
+
+  // archinstall preseed — firstboot launches `archinstall --config` with
+  // this, so the disk install inherits the user's Operate config instead of
+  // producing a vanilla Arch system.
+  const etcOperate = path.join(etc, "operate");
+  await mkdir(etcOperate, { recursive: true });
+  await writeFile(
+    path.join(etcOperate, "archinstall.json"),
+    buildArchinstallPreseed(config, targetPackages),
+  );
+  appendLog(
+    job,
+    `[operate] archinstall preseed baked (${targetPackages.length} target packages)\n`,
+  );
+
+  // operate-adopt — copies the Operate identity (dotfiles, theme, wallpaper)
+  // onto the installed system after archinstall succeeds.
+  const localBin = path.join(profileDir, "airootfs", "usr", "local", "bin");
+  await mkdir(localBin, { recursive: true });
+  await writeFile(path.join(localBin, "operate-adopt"), ADOPT_SCRIPT, {
+    mode: 0o755,
+  });
 
   const sudoersD = path.join(etc, "sudoers.d");
   await mkdir(sudoersD, { recursive: true });
@@ -407,6 +764,13 @@ async function prepareProfile(
     appendLog(job, `[operate] applied Hyprland defaults (waybar + keybinds)\n`);
   }
 
+  const usesSDDM = config.services.some(
+    (s) => s.replace(/\.service$/, "") === "sddm",
+  );
+  if (usesSDDM) {
+    await bakeSilentSddmTheme(profileDir, job);
+  }
+
   await applyBootBranding(profileDir, job);
   await writeIssueBanner(profileDir);
 
@@ -421,10 +785,11 @@ async function prepareProfile(
     `iso_label="OPERATE_${Date.now().toString(36).toUpperCase()}"`,
   );
   // mkarchiso strips mode bits during the airootfs overlay (cp -af
-  // --no-preserve=mode), so credential files default to 0644 unless we
-  // re-assert perms via file_permissions. /etc/shadow is already locked down
-  // by baseline; add /etc/gshadow alongside it.
-  pd += `\nfile_permissions+=(\n  ["/etc/gshadow"]="0:0:400"\n)\n`;
+  // --no-preserve=mode), so executables we drop in need their 0755 re-asserted
+  // via profiledef's file_permissions. customize_airootfs.sh in particular
+  // MUST be executable or mkarchiso won't run it in the chroot — and that's
+  // where we systemctl-enable services.
+  pd += `\nfile_permissions+=(\n  ["/usr/local/bin/operate-firstboot"]="0:0:755"\n  ["/usr/local/bin/operate-adopt"]="0:0:755"\n  ["/usr/local/bin/operate-keybinds"]="0:0:755"\n  ["/root/customize_airootfs.sh"]="0:0:755"\n)\n`;
   await writeFile(profileDef, pd);
 
   return profileDir;
@@ -503,6 +868,7 @@ export async function startBuild(
       job.status = "running";
       await syncStatus("running");
       appendLog(job, `[operate] job ${id} starting\n`);
+      await sweepStalePartFiles(job);
       const profileDir = await prepareProfile(jobDir, config, job);
       appendLog(job, `[operate] profile prepared at ${profileDir}\n`);
 
@@ -525,6 +891,12 @@ export async function startBuild(
     } catch (err) {
       job.status = "failed";
       const rawError = err instanceof Error ? err.message : String(err);
+      // delete corrupt cached packages BEFORE diagnosing so the error message
+      // can truthfully say they're gone and a retry will re-download them
+      await deleteCorruptCachedPackages(
+        findCorruptCachedPackages(job.log),
+        job,
+      );
       job.error = diagnoseFailure(rawError, job.log);
       job.finishedAt = Date.now();
       appendLog(job, `[operate] FAILED: ${job.error}\n`);
