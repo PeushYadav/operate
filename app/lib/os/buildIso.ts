@@ -581,11 +581,31 @@ async function prepareProfile(
     .map((l) => l.trim())
     .filter(Boolean);
 
+  // SilentSDDM's QML greeter imports QtMultimedia — if it's missing the
+  // theme fails to load (falls back to a broken/blank greeter) on whichever
+  // system actually renders it: the live ISO AND the disk-installed system,
+  // since operate-adopt copies the theme onto the target too. Pin it into
+  // both package lists below whenever SDDM is enabled, rather than relying
+  // on the LLM to have included it.
+  const usesSDDM = config.services.some(
+    (s) => s.replace(/\.service$/, "") === "sddm",
+  );
+
   // networkmanager is pinned explicitly: customize_airootfs.sh enables
   // NetworkManager.service, and the LLM's package list doesn't reliably
-  // include the package itself.
+  // include the package itself. archinstall is pinned for the same reason —
+  // operate-firstboot invokes it directly (see firstboot.ts) regardless of
+  // whether the LLM's recommendation happened to include it, so the live ISO
+  // must always ship it or the firstboot installer step is unusable.
   const requested = Array.from(
-    new Set([...existing, config.kernel, ...config.packages, "networkmanager"]),
+    new Set([
+      ...existing,
+      config.kernel,
+      ...config.packages,
+      "networkmanager",
+      "archinstall",
+      ...(usesSDDM ? ["qt6-multimedia-ffmpeg"] : []),
+    ]),
   );
   const remapped: string[] = [];
   const substitutions: string[] = [];
@@ -613,7 +633,11 @@ async function prepareProfile(
   // handled by the preseed's `kernels` key.
   const targetPackages = Array.from(
     new Set(
-      [...config.packages, "networkmanager"]
+      [
+        ...config.packages,
+        "networkmanager",
+        ...(usesSDDM ? ["qt6-multimedia-ffmpeg"] : []),
+      ]
         .map((p) => PROVIDER_MAP[p] ?? p)
         .filter((p) => validMap.get(p) === true),
     ),
@@ -764,9 +788,6 @@ async function prepareProfile(
     appendLog(job, `[operate] applied Hyprland defaults (waybar + keybinds)\n`);
   }
 
-  const usesSDDM = config.services.some(
-    (s) => s.replace(/\.service$/, "") === "sddm",
-  );
   if (usesSDDM) {
     await bakeSilentSddmTheme(profileDir, job);
   }
@@ -783,6 +804,21 @@ async function prepareProfile(
   pd = pd.replace(
     /iso_label=".*"/,
     `iso_label="OPERATE_${Date.now().toString(36).toUpperCase()}"`,
+  );
+  // The baseline profile compresses the airootfs with LZMA at its most
+  // extreme preset (-zlzma,109) — great for minimal-size official release
+  // ISOs built on beefy CI, brutal for a local rebuild-and-test loop: it's
+  // both CPU- and memory-hungry, which hurts badly on a RAM-constrained dev
+  // machine. zstd gets a build to a bootable ISO several times faster with
+  // far less memory pressure, at the cost of a somewhat larger image — a
+  // trade worth making for local iteration.
+  pd = pd.replace(
+    /airootfs_image_tool_options=\(.*\)/,
+    `airootfs_image_tool_options=('-zzstd,level=9' -E 'ztailpacking')`,
+  );
+  appendLog(
+    job,
+    `[operate] airootfs compression set to zstd,level=9 (faster/lighter than the baseline's lzma,109)\n`,
   );
   // mkarchiso strips mode bits during the airootfs overlay (cp -af
   // --no-preserve=mode), so executables we drop in need their 0755 re-asserted

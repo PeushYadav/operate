@@ -148,7 +148,15 @@ EOF
       printf '%s\\n' ""
       read -rp "  Press enter to launch the installer."
       set +e
-      archinstall --config /etc/operate/archinstall.json --creds /tmp/operate-creds.json
+      # --skip-ntp: archinstall's NTP wait (installer.py _verify_service_stop)
+      # is a bare while-True loop with NO timeout, polling \`timedatectl show
+      # --property=NTPSynchronized\` once a second. On networks that block
+      # outbound NTP (UDP 123) — common on campus/hostel/ISP firewalls — that
+      # loop never exits and the install hangs forever with no way out short
+      # of faking /run/systemd/timesync/synchronized from another tty. The
+      # live system's clock is already accurate (VM/host RTC or DHCP), so
+      # skipping the wait is safe.
+      archinstall --config /etc/operate/archinstall.json --creds /tmp/operate-creds.json --skip-ntp
       rc=\$?
       set -e
       rm -f /tmp/operate-creds.json

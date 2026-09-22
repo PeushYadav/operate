@@ -90,9 +90,9 @@ ${JSON.stringify(body, null, 2)}
 Template library:
 ${JSON.stringify(templates, null, 2)}`;
 
-  try {
+  const attempt = async () => {
     const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
@@ -110,17 +110,30 @@ ${JSON.stringify(templates, null, 2)}`;
       !parsed.config?.hostname ||
       !parsed.config?.username
     ) {
+      throw new Error(`LLM returned an incomplete config: ${raw}`);
+    }
+
+    return parsed;
+  };
+
+  // The LLM occasionally hiccups on long/complex prompts (malformed JSON,
+  // transient API error) — one retry clears most of those without the user
+  // needing to resubmit by hand.
+  try {
+    const parsed = await attempt();
+    return NextResponse.json(parsed);
+  } catch (firstErr) {
+    try {
+      const parsed = await attempt();
+      return NextResponse.json(parsed);
+    } catch (secondErr) {
       return NextResponse.json(
-        { error: "LLM returned an incomplete config", raw },
+        {
+          error: "Failed to generate recommendation",
+          details: `attempt 1: ${String(firstErr)} | attempt 2: ${String(secondErr)}`,
+        },
         { status: 502 },
       );
     }
-
-    return NextResponse.json(parsed);
-  } catch (err) {
-    return NextResponse.json(
-      { error: "Failed to generate recommendation", details: String(err) },
-      { status: 502 },
-    );
   }
 }
